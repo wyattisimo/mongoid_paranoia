@@ -36,14 +36,17 @@ module Mongoid
     #
     # @example
     #   Mongoid::Paranoia.configure do |c|
-    #     c.paranoid_field = :myFieldName
+    #     c.paranoid_field = :archived_at
     #   end
     def self.configure
       yield(configuration)
     end
 
     included do
-      field Paranoia.configuration.paranoid_field, as: :deleted_at, type: Time
+      class_attribute :paranoid_configuration
+      self.paranoid_configuration = Paranoia.configuration.dup
+
+      field self.paranoid_configuration.paranoid_field, type: Time
 
       self.paranoid = true
 
@@ -52,6 +55,49 @@ module Mongoid
       define_model_callbacks :restore
       define_model_callbacks :remove
     end
+
+
+    class_methods do
+
+      # Allow this particular paranoid +Document+ class to use an alternate field name
+      # in place of "deleted_at", while other classes adhere to the global configuration.
+      #
+      # @example
+      #   paranoid_field :archived_at
+      #
+      def paranoid_field(paranoid_field)
+        paranoid_configuration.paranoid_field = paranoid_field
+        paranoid_setup
+      end
+
+      # Allow this particular paranoid +Document+ class to use an alternate scope name
+      # in place of "deleted", while other classes adhere to the global configuration.
+      # If a custom paranoid field is not already set, this will also set a custom
+      # paranoid field name by appending "_at" to the scope name.
+      #
+      # @example
+      #   paranoid_scope :archived
+      #
+      def paranoid_scope(paranoid_scope)
+        paranoid_configuration.paranoid_scope = paranoid_scope
+        if paranoid_configuration.paranoid_field == Paranoia.configuration.DEFAULT_PARANOID_FIELD
+          paranoid_configuration.paranoid_field = "#{paranoid_scope}_at"
+        end
+        paranoid_setup
+      end
+
+      protected def paranoid_setup
+        if paranoid_configuration.paranoid_field != Paranoia.configuration.DEFAULT_PARANOID_FIELD
+          default_scope -> { where(paranoid_configuration.paranoid_field => nil) }
+          alias_method "#{paranoid_configuration.paranoid_scope}?", :destroyed?
+        end
+        if paranoid_configuration.paranoid_scope != Paranoia.configuration.DEFAULT_PARANOID_SCOPE
+          scope paranoid_configuration.paranoid_scope, -> { ne(paranoid_configuration.paranoid_field => nil) }
+        end
+      end
+
+    end
+
 
     # Delete the paranoid +Document+ from the database completely. This will
     # run the destroy callbacks.
@@ -97,7 +143,7 @@ module Mongoid
     # @since 1.0.0
     def remove_with_paranoia(options = {})
       cascade!
-      time = self.deleted_at = Time.now
+      time = self.send("#{paranoid_field}=", Time.now)
       update("$set" => { paranoid_field => time })
       @destroyed = true
       true
@@ -126,7 +172,7 @@ module Mongoid
     #
     # @since 1.0.0
     def destroyed?
-      (@destroyed ||= false) || !!deleted_at
+      (@destroyed ||= false) || !!self.send(paranoid_field)
     end
     alias :deleted? :destroyed?
 
@@ -146,7 +192,7 @@ module Mongoid
     def restore(opts = {})
       run_callbacks(:restore) do
         update("$unset" => { paranoid_field => true })
-        attributes.delete("deleted_at")
+        attributes.delete(paranoid_field)
         @destroyed = false
         restore_relations if opts[:recursive]
         true
@@ -189,7 +235,7 @@ module Mongoid
     #
     # @return [ String ] The deleted at field.
     def paranoid_field
-      field = Paranoia.configuration.paranoid_field
+      field = self.class.paranoid_configuration.paranoid_field
       embedded? ? "#{atomic_position}.#{field}" : field
     end
 
